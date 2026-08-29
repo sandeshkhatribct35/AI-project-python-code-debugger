@@ -7,5 +7,10 @@ This project includes an Ethics section addressing: privacy, intellectual proper
 - AI suggestions are recommendations — they may be incorrect and must be reviewed by a human.
 - Document dataset provenance and possible biases.
 - Use sandboxed or static analysis to reduce execution risks.
+ 
+Dataset provenance and bias
+---------------------------
+
+The primary dataset used for initial development is synthetic and contains binary labels only (buggy vs clean). Synthetic data can introduce biases or unrealistic error distributions compared to real-world source code. We will document this provenance, avoid overclaiming real-world performance, and (where possible) augment or validate models on real bug-fix data before presenting final results.
 
 (Full section will be expanded as part of project documentation.)
