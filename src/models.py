@@ -8,13 +8,13 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 
 
 def train_model(X, y, model_type: str = 'random_forest') -> Any:
     """Train and return a fitted model. Replace with real training code when dataset available."""
     if model_type == 'random_forest':
-        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
         model = RandomForestClassifier(n_estimators=100, random_state=42)
     elif model_type == 'decision_tree':
         from sklearn.tree import DecisionTreeClassifier
@@ -53,6 +53,9 @@ def build_classification_pipelines(random_state: int = 42) -> Dict[str, Any]:
     ])
     pipelines['random_forest'] = Pipeline([
         ('clf', RandomForestClassifier(n_estimators=100, random_state=random_state)),
+    ])
+    pipelines['gradient_boosting'] = Pipeline([
+        ('clf', GradientBoostingClassifier(n_estimators=50, max_depth=1, random_state=random_state)),
     ])
     return pipelines
 

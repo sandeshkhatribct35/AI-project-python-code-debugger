@@ -1,0 +1,448 @@
+diff --git a/src/code_analyzer.py b/src/code_analyzer.py
+index 8de3b70..639b4c5 100644
+--- a/src/code_analyzer.py
++++ b/src/code_analyzer.py
+@@ -1,15 +1,208 @@
+-"""Static analysis and safe execution helpers."""
++"""Static analysis helpers that operate without executing submitted code.
++
++This module provides a simple, explainable static analyzer that builds on
++`ast` and token-level inspection. It purposely avoids any form of execution
++(`exec`, `eval`, subprocess, importlib execution, etc.). The output is a
++serializable dictionary suitable for UI/display layers and automated tests.
++"""
++from typing import Any, Dict, List, Optional
+ import ast
+-from typing import Tuple, Optional
++import io
++import tokenize
++
++from src.feature_extraction import extract_features
++
++
++def _detect_unmatched_delimiters(code: str) -> List[Dict[str, Any]]:
++    """Detect obvious unmatched delimiters by simple counts.
++
++    This is conservative â€” counts only and reports mismatches. Line numbers
++    are not always available from a count-based approach.
++    """
++    warnings: List[Dict[str, Any]] = []
++    if code.count('(') != code.count(')'):
++        warnings.append({
++            'type': 'unmatched_delimiter',
++            'severity': 'warning',
++            'message': 'Mismatched parentheses: number of "(" and ")" differs.',
++            'line': None,
++            'explanation': 'The text contains a different number of opening and closing parentheses.',
++            'suggestion': 'Check that every "(" has a matching ")" and that string literals do not contain unescaped parentheses.'
++        })
++    if code.count('[') != code.count(']'):
++        warnings.append({
++            'type': 'unmatched_delimiter',
++            'severity': 'warning',
++            'message': 'Mismatched square brackets: number of "[" and "]" differs.',
++            'line': None,
++            'explanation': 'The text contains a different number of opening and closing square brackets.',
++            'suggestion': 'Verify list/ indexing brackets and string literals.'
++        })
++    if code.count('{') != code.count('}'):
++        warnings.append({
++            'type': 'unmatched_delimiter',
++            'severity': 'warning',
++            'message': 'Mismatched braces: number of "{" and "}" differs.',
++            'line': None,
++            'explanation': 'The text contains a different number of opening and closing braces.',
++            'suggestion': 'Check dict or set literals and formatting placeholders.'
++        })
++    return warnings
++
+ 
++def _detect_indentation_issues(code: str) -> List[Dict[str, Any]]:
++    """Detect obvious indentation issues such as tabs or a mixture of tabs and spaces.
+ 
+-def analyze_code_safely(code: str) -> Tuple[Optional[str], Optional[str]]:
+-    """Attempt to parse the code and return (exception_type, exception_message).
++    This is conservative: it reports presence of tab characters and whether both
++    tabs and leading-space indents are present across non-blank lines.
++    """
++    warnings: List[Dict[str, Any]] = []
++    lines = code.splitlines()
++    has_tab = False
++    for ln in lines:
++        if not ln.strip():
++            continue
++        if '\t' in ln:
++            has_tab = True
++
++    if has_tab:
++        warnings.append({
++            'type': 'indentation_tabs',
++            'severity': 'warning',
++            'message': 'Tab character(s) used for indentation.',
++            'line': None,
++            'explanation': 'Tabs are present in the source; mixing tabs and spaces may cause IndentationError.',
++            'suggestion': 'Use spaces consistently (PEP8 recommends 4 spaces) or convert tabs to spaces.'
++        })
++
++    # detect mixed leading whitespace (lines that start with spaces and lines that start with tabs)
++    starts_with_space = any(ln.startswith(' ') for ln in lines if ln.strip())
++    starts_with_tab = any(ln.startswith('\t') for ln in lines if ln.strip())
++    if starts_with_space and starts_with_tab:
++        warnings.append({
++            'type': 'indentation_mixed',
++            'severity': 'warning',
++            'message': 'Mixed indentation detected (tabs and spaces).',
++            'line': None,
++            'explanation': 'Some lines are indented with spaces while others use tabs.',
++            'suggestion': 'Normalize indentation to spaces or tabs consistently.'
++        })
++
++    return warnings
+ 
+-    This function currently uses `ast.parse` for safe syntax checks. Do NOT execute untrusted code.
++
++def _detect_suspicious_structures(code: str) -> List[Dict[str, Any]]:
++    """Detect a small set of structural patterns reliably via the AST.
++
++    Examples: bare except, use of eval/exec (flagged as potentially risky),
++    and very large functions (informational).
+     """
++    warnings: List[Dict[str, Any]] = []
++    try:
++        tree = ast.parse(code)
++    except Exception:
++        return warnings
++
++    for node in ast.walk(tree):
++        # bare except
++        if isinstance(node, ast.ExceptHandler):
++            if node.type is None:
++                warnings.append({
++                    'type': 'bare_except',
++                    'severity': 'warning',
++                    'message': 'Bare except clause detected.',
++                    'line': getattr(node, 'lineno', None),
++                    'explanation': 'A bare "except:" catches all exceptions and can hide errors.',
++                    'suggestion': 'Catch specific exception types (e.g., "except ValueError:").'
++                })
++        # exec/eval usage
++        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
++            if node.func.id in ('exec', 'eval'):
++                warnings.append({
++                    'type': 'dynamic_execution',
++                    'severity': 'warning',
++                    'message': f'Use of {node.func.id}() detected.',
++                    'line': getattr(node, 'lineno', None),
++                    'explanation': f'Calling {node.func.id}() executes dynamic code which is risky.',
++                    'suggestion': 'Avoid exec/eval; refactor to safer alternatives.'
++                })
++        # very large function body (informational)
++        if isinstance(node, ast.FunctionDef):
++            body_len = len(node.body)
++            if body_len > 200:
++                warnings.append({
++                    'type': 'large_function',
++                    'severity': 'info',
++                    'message': f'Function "{node.name}" has a large body ({body_len} statements).',
++                    'line': getattr(node, 'lineno', None),
++                    'explanation': 'Very large functions are harder to reason about and test.',
++                    'suggestion': 'Consider refactoring into smaller helper functions.'
++                })
++
++    return warnings
++
++
++def analyze_source(code: str) -> Dict[str, Any]:
++    """Perform static analysis on `code` and return a structured result.
++
++    The result contains:
++      - parse_success: bool
++      - syntax_error: optional dict with type/message/line
++      - warnings: list of structured warnings
++      - metrics: feature dict returned by `extract_features`
++
++    This function never executes the submitted code.
++    """
++    result: Dict[str, Any] = {}
++    if code is None:
++        code = ''
++
++    # Basic metrics via feature_extraction (reuses training-time logic)
++    try:
++        metrics = extract_features(code)
++    except Exception:
++        metrics = {}
++    result['metrics'] = metrics
++
++    # Attempt to parse and capture a SyntaxError with line info if present
+     try:
+         ast.parse(code)
++        result['parse_success'] = True
++        result['syntax_error'] = None
++    except SyntaxError as se:
++        result['parse_success'] = False
++        result['syntax_error'] = {
++            'type': type(se).__name__,
++            'message': str(se.msg) if hasattr(se, 'msg') else str(se),
++            'line': se.lineno,
++            'offset': se.offset,
++        }
+     except Exception as e:
+-        return (type(e).__name__, str(e))
+-    return (None, None)
++        # Other parse-time errors
++        result['parse_success'] = False
++        result['syntax_error'] = {
++            'type': type(e).__name__,
++            'message': str(e),
++            'line': None,
++        }
++
++    # Collect warnings from multiple detectors (conservative)
++    warnings: List[Dict[str, Any]] = []
++    warnings.extend(_detect_unmatched_delimiters(code))
++    warnings.extend(_detect_indentation_issues(code))
++    warnings.extend(_detect_suspicious_structures(code))
++
++    # If parse failed and no specific syntax warning present, add a generic one
++    if not result.get('parse_success', True) and not any(w.get('type') == 'syntax_error' for w in warnings):
++        syntax = result.get('syntax_error')
++        warnings.insert(0, {
++            'type': 'syntax_error',
++            'severity': 'error',
++            'message': 'Python syntax could not be parsed.',
++            'line': syntax.get('line') if syntax else None,
++            'explanation': 'ast.parse() failed; code contains a syntax error.',
++            'suggestion': 'Check the reported line and surrounding context for missing punctuation or unmatched delimiters.'
++        })
++
++    result['warnings'] = warnings
++    return result
+diff --git a/src/explainers.py b/src/explainers.py
+index e66e53c..b0c81a9 100644
+--- a/src/explainers.py
++++ b/src/explainers.py
+@@ -1,18 +1,148 @@
+-"""Generate human-friendly explanations for model predictions."""
+-
+-
+-def explain_prediction(pred_label: str, model_prob: float = None) -> str:
+-    explanation_map = {
+-        'SyntaxError': 'There is a syntax problem: code cannot be parsed. Check punctuation and structure.',
+-        'NameError': 'A variable or function name is used before it is defined.',
+-        'TypeError': 'An operation received an operand of an unexpected type.',
+-        'IndexError': 'A sequence was accessed with an invalid index.',
+-        'IndentationError': 'Indentation is inconsistent or incorrect (Python).',
+-        'ZeroDivisionError': 'Division by zero was attempted.',
+-        'AttributeError': 'An attribute or method was accessed on an object that does not have it.',
+-        'Other': 'The error is uncommon or could not be classified confidently.'
+-    }
+-    base = explanation_map.get(pred_label, explanation_map['Other'])
+-    if model_prob is not None:
+-        base += f" (model confidence: {model_prob:.2f})"
+-    return base
++"""Explanation layer combining model results and static analysis.
++
++This module provides a safe backend function `analyze_and_explain` which:
++ - applies conservative unescaping,
++ - extracts the trained model features in the saved order,
++ - calls the saved model for prediction/probability,
++ - runs static analysis (via `src.code_analyzer.analyze_source`), and
++ - returns a structured result plus a human-readable explanation string.
++
++The module intentionally uses non-opinionated, carefully-worded text for
++explanations suitable for an educational debugging assistant.
++"""
++from typing import Any, Dict, Optional
++import os
++import joblib
++
++from src import code_analyzer
++from src.feature_extraction import extract_features
++from src import data_loader
++
++
++def _conservative_unescape(s: Optional[str]) -> str:
++    if s is None:
++        return ''
++    return str(s).replace('\\n', '\n').replace('\\t', '\t').replace('\\r', '\r')
++
++
++def _format_explanation(pred_label: str, prob: Optional[float], static_warnings: list, metrics: dict) -> str:
++    parts = []
++    # Model-based explanation (careful wording)
++    parts.append(f"The model classified this code as **{pred_label}**.")
++    if prob is not None:
++        parts.append(f"Model confidence: {prob:.2f}.")
++
++    # Static warnings summary
++    if static_warnings:
++        parts.append(f"Static analysis reported {len(static_warnings)} warning(s). See details below.")
++    else:
++        parts.append("Static analysis did not find obvious syntax or structural issues.")
++
++    # Add a short metrics summary
++    if metrics:
++        parts.append(f"Quick metrics: {metrics.get('n_lines', 0)} lines, {metrics.get('n_functions', 0)} function(s).")
++
++    # A gentle note about statistical nature
++    parts.append("Note: the model prediction is statistical; absence of static warnings does not guarantee correctness.")
++    return " \n".join(parts)
++
++
++def analyze_and_explain(code: str, model_joblib_path: str = 'models/code_bug_classifier.joblib') -> Dict[str, Any]:
++    """Run the full backend analysis (static analysis + ML) and return structured result.
++
++    The returned dict contains:
++      - `static`: output of `code_analyzer.analyze_source`
++      - `prediction`: {'label': str, 'probability': float or None}
++      - `explanation`: human-friendly text
++
++    This function never executes the submitted code.
++    """
++    result: Dict[str, Any] = {}
++    code_proc = _conservative_unescape(code)
++
++    # static analysis
++    static = code_analyzer.analyze_source(code_proc)
++    result['static'] = static
++
++    # model inference
++    try:
++        payload = joblib.load(model_joblib_path)
++        model = payload.get('model')
++        feature_names = payload.get('feature_names')
++    except Exception as e:
++        result['prediction'] = {'label': None, 'probability': None, 'error': str(e)}
++        result['explanation'] = 'Model could not be loaded.'
++        return result
++
++    # Extract features using the project's feature extractor
++    feats = extract_features(code_proc)
++
++    # Build feature vector in exact saved order
++    if feature_names is None:
++        raise ValueError('Saved model payload must include feature_names')
++    try:
++        x = [feats[name] for name in feature_names]
++    except KeyError as ke:
++        raise KeyError(f'Missing feature for inference: {ke}')
++
++    # Predict
++    try:
++        pred = model.predict([x])[0]
++    except Exception as e:
++        result['prediction'] = {'label': None, 'probability': None, 'error': str(e)}
++        result['explanation'] = 'Model prediction failed.'
++        return result
++
++    prob = None
++    try:
++        # many sklearn estimators support predict_proba
++        if hasattr(model, 'predict_proba'):
++            proba = model.predict_proba([x])
++            # if binary, take probability for positive class (index 1) when available
++            if proba.shape[1] == 2:
++                prob = float(proba[0, 1])
++            else:
++                # fallback: max class probability
++                prob = float(proba[0].max())
++    except Exception:
++        prob = None
++
++    # Map numeric model label to a verified user-facing label.
++    def _numeric_label_to_name(numeric_label: int) -> str:
++        # Try to infer mapping from dataset metadata in `data/`
++        try:
++            mapping = data_loader.infer_label_meaning(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data'))
++        except Exception:
++            mapping = None
++
++        if mapping is not None and int(numeric_label) in mapping:
++            name = mapping[int(numeric_label)]
++        else:
++            # Fallback: consult top-level README if present
++            try:
++                base_readme = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'README.md')
++                base_readme = os.path.normpath(base_readme)
++                if os.path.exists(base_readme):
++                    txt = open(base_readme, 'r', encoding='utf-8', errors='ignore').read().lower()
++                    if '0/1 indicate clean vs buggy' in txt or ('0' in txt and 'clean' in txt and '1' in txt and 'bug' in txt):
++                        name = {0: 'Clean', 1: 'Buggy'}.get(int(numeric_label), str(numeric_label))
++                    else:
++                        name = {0: 'Clean', 1: 'Buggy'}.get(int(numeric_label), str(numeric_label))
++                else:
++                    name = {0: 'Clean', 1: 'Buggy'}.get(int(numeric_label), str(numeric_label))
++            except Exception:
++                name = {0: 'Clean', 1: 'Buggy'}.get(int(numeric_label), str(numeric_label))
++
++        # Normalize capitalization
++        if isinstance(name, str):
++            return name.capitalize()
++        return str(name)
++
++    numeric = int(pred)
++    human_label = _numeric_label_to_name(numeric)
++
++    result['prediction'] = {'numeric_label': numeric, 'label': human_label, 'probability': prob}
++
++    # generate human-friendly explanation
++    result['explanation'] = _format_explanation(result['prediction']['label'], prob, static.get('warnings', []), static.get('metrics', {}))
++    return result
+diff --git a/src/recommendations.py b/src/recommendations.py
+index 8d1da7e..8977c0e 100644
+--- a/src/recommendations.py
++++ b/src/recommendations.py
+@@ -1,9 +1,43 @@
+-"""Produce suggested code fixes and debugging recommendations."""
++"""Produce suggested code fixes and debugging recommendations.
++
++Recommendations are derived only from static warnings detected by the analyzer.
++They are conservative, actionable hints rather than guaranteed fixes.
++"""
++from typing import List, Dict, Any
++
++
++def recommendations_from_warnings(warnings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Turn analyzer warnings into concrete recommendations.
++
++    Each recommendation is a dict with fields: `type`, `message`, `suggestion`,
++    and optional `line` and `severity` copied from the warning.
++    """
++    recs: List[Dict[str, Any]] = []
++    for w in warnings:
++        t = w.get('type')
++        base = {
++            'type': t,
++            'severity': w.get('severity'),
++            'line': w.get('line'),
++            'message': w.get('message'),
++            'suggestion': w.get('suggestion') or 'Review the code and fix the reported issue.'
++        }
++        # Minor customization for a few known types
++        if t == 'syntax_error' or t == 'unmatched_delimiter':
++            base['suggestion'] = 'Check the reported line for missing punctuation, brackets, or invalid Python syntax.'
++        elif t == 'indentation_tabs' or t == 'indentation_mixed':
++            base['suggestion'] = 'Use consistent spaces for indentation (PEP8 recommends 4 spaces). Consider running a formatter.'
++        elif t == 'bare_except':
++            base['suggestion'] = 'Replace bare except with specific exception types (e.g., "except ValueError:").'
++        elif t == 'dynamic_execution':
++            base['suggestion'] = 'Avoid exec/eval; evaluate safer design patterns and validate input before executing dynamic code.'
++        recs.append(base)
++    return recs
+ 
+ 
+ def suggest_fix(code: str, error_type: str) -> str:
+-    """Return a simple suggested fix or guidance based on error_type. These are templates, not guaranteed fixes."""
+-    suggestions = {
++    """Backward-compatible simple suggester for tests or old callers."""
++    mapping = {
+         'SyntaxError': 'Check for missing colons, parentheses, or incorrect indentation.',
+         'NameError': 'Ensure the variable or function is defined before use and check for typos.',
+         'TypeError': 'Check data types and conversions; add explicit casts if needed.',
+@@ -12,4 +46,4 @@ def suggest_fix(code: str, error_type: str) -> str:
+         'ZeroDivisionError': 'Guard divisions with checks for zero denominators.',
+         'AttributeError': 'Verify the object type and available attributes/methods.'
+     }
+-    return suggestions.get(error_type, 'Review the code and add logging or prints to isolate the issue.')
++    return mapping.get(error_type, 'Review the code and add logging or prints to isolate the issue.')

@@ -1,0 +1,83 @@
+{
+  "selected_model": "gradient_boosting",
+  "rows": 2215,
+  "groups": 1215,
+  "results": [
+    {
+      "model": "logistic_regression",
+      "cv_f1_mean": 0.8961189495886497,
+      "cv_f1_std": 0.019831874928932337,
+      "test_accuracy": 0.9044444444444445,
+      "test_precision": 0.905352343558931,
+      "test_recall": 0.9044444444444445,
+      "test_f1": 0.9043560769031688,
+      "confusion_matrix": [
+        [
+          212,
+          16
+        ],
+        [
+          27,
+          195
+        ]
+      ]
+    },
+    {
+      "model": "decision_tree",
+      "cv_f1_mean": 0.8793725373629224,
+      "cv_f1_std": 0.016040651550143697,
+      "test_accuracy": 0.8977777777777778,
+      "test_precision": 0.9002359317710824,
+      "test_recall": 0.8977777777777778,
+      "test_f1": 0.8975590816346743,
+      "confusion_matrix": [
+        [
+          214,
+          14
+        ],
+        [
+          32,
+          190
+        ]
+      ]
+    },
+    {
+      "model": "random_forest",
+      "cv_f1_mean": 0.8868495594145024,
+      "cv_f1_std": 0.00819847162982303,
+      "test_accuracy": 0.8866666666666667,
+      "test_precision": 0.8924821674758737,
+      "test_recall": 0.8866666666666667,
+      "test_f1": 0.8863486407435454,
+      "confusion_matrix": [
+        [
+          189,
+          39
+        ],
+        [
+          12,
+          210
+        ]
+      ]
+    },
+    {
+      "model": "gradient_boosting",
+      "cv_f1_mean": 0.9020802334612659,
+      "cv_f1_std": 0.01663993591422084,
+      "test_accuracy": 0.9066666666666666,
+      "test_precision": 0.9066666666666666,
+      "test_recall": 0.9066666666666666,
+      "test_f1": 0.9066666666666666,
+      "confusion_matrix": [
+        [
+          207,
+          21
+        ],
+        [
+          21,
+          201
+        ]
+      ]
+    }
+  ]
+}
